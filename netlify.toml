@@ -1,0 +1,26 @@
+[build]
+  # No frontend compile step; install deps then publish public/
+  command = "npm install"
+  publish = "public"
+  functions = "netlify/functions"
+
+[build.environment]
+  NODE_VERSION = "20"
+
+[functions]
+  # Keep function cold-start smaller; media JSON is loaded from publish/function bundle as needed
+  node_bundler = "esbuild"
+  included_files = ["media_gallery/data/**", "lib/**", "server/**"]
+
+# API -> Netlify Function
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/api"
+  status = 200
+  force = true
+
+# SPA fallback
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

@@ -5,13 +5,15 @@
   "type": "module",
   "scripts": {
     "start": "node server/index.js",
-    "dev": "node --watch server/index.js"
+    "dev": "node --watch server/index.js",
+    "build": "echo \"no build\""
   },
   "dependencies": {
     "cheerio": "^1.0.0",
     "crypto-js": "^4.2.0",
     "express": "^4.21.2",
-    "node-fetch": "^3.3.2"
+    "node-fetch": "^3.3.2",
+    "serverless-http": "^4.0.0"
   },
   "engines": {
     "node": ">=18"
