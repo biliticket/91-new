@@ -1197,7 +1197,357 @@ async function route() {
 
 /* =========================================================
    Media library (exported DB images / videos)
+   Static JSON under /media-data (no /api/media on Netlify)
    ========================================================= */
+
+const MEDIA_DATA_BASE = "/media-data";
+const IMG_CDNS = [
+  "https://imgpublic.ycomesc.live",
+  "https://pic.jjlxoi.cn",
+  "https://pic.uforxk.cn",
+  "https://image.qzycbu.cn",
+  "https://new.qzycbu.cn",
+  "https://pwa.eisees.com",
+];
+const VID_CDN = "https://hls.ffxddn.cn";
+const HLS_KEY = "RnOxyCIc5eDPFpJY";
+
+const mediaState = {
+  meta: null,
+  videos: null,
+  mediaVideos: null,
+  imageChunks: new Map(),
+};
+
+async function fetchJSON(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`${url} ${res.status}`);
+  return res.json();
+}
+
+async function loadMediaMeta() {
+  if (!mediaState.meta) {
+    mediaState.meta = await fetchJSON(`${MEDIA_DATA_BASE}/meta.json`);
+  }
+  return mediaState.meta;
+}
+
+async function loadVideos() {
+  if (!mediaState.videos) {
+    mediaState.videos = await fetchJSON(`${MEDIA_DATA_BASE}/videos.json`);
+  }
+  return mediaState.videos;
+}
+
+async function loadMediaVideos() {
+  if (!mediaState.mediaVideos) {
+    mediaState.mediaVideos = await fetchJSON(`${MEDIA_DATA_BASE}/media_videos.json`);
+  }
+  return mediaState.mediaVideos;
+}
+
+async function loadImageChunk(idx) {
+  if (mediaState.imageChunks.has(idx)) return mediaState.imageChunks.get(idx);
+  const file = `${MEDIA_DATA_BASE}/images_${String(idx).padStart(3, "0")}.json`;
+  const arr = await fetchJSON(file);
+  mediaState.imageChunks.set(idx, arr);
+  return arr;
+}
+
+function md5browser(str) {
+  // small md5 for HLS signing (same as gallery)
+  function cmn(q, a, b, x, s, t) {
+    a = (a + q + x + t) | 0;
+    return (((a << s) | (a >>> (32 - s))) + b) | 0;
+  }
+  function ff(a, b, c, d, x, s, t) {
+    return cmn((b & c) | (~b & d), a, b, x, s, t);
+  }
+  function gg(a, b, c, d, x, s, t) {
+    return cmn((b & d) | (c & ~d), a, b, x, s, t);
+  }
+  function hh(a, b, c, d, x, s, t) {
+    return cmn(b ^ c ^ d, a, b, x, s, t);
+  }
+  function ii(a, b, c, d, x, s, t) {
+    return cmn(c ^ (b | ~d), a, b, x, s, t);
+  }
+  function md5blk(s) {
+    const blks = [];
+    for (let i = 0; i < 64; i += 4) {
+      blks[i >> 2] =
+        s.charCodeAt(i) +
+        (s.charCodeAt(i + 1) << 8) +
+        (s.charCodeAt(i + 2) << 16) +
+        (s.charCodeAt(i + 3) << 24);
+    }
+    return blks;
+  }
+  function md51(s) {
+    const n = s.length;
+    const state = [1732584193, -271733879, -1732584194, 271733878];
+    let i;
+    for (i = 64; i <= n; i += 64) md5cycle(state, md5blk(s.substring(i - 64, i)));
+    s = s.substring(i - 64);
+    const tail = Array(16).fill(0);
+    for (i = 0; i < s.length; i++) tail[i >> 2] |= s.charCodeAt(i) << ((i % 4) << 3);
+    tail[i >> 2] |= 0x80 << ((i % 4) << 3);
+    if (i > 55) {
+      md5cycle(state, tail);
+      for (i = 0; i < 16; i++) tail[i] = 0;
+    }
+    tail[14] = n * 8;
+    md5cycle(state, tail);
+    return state;
+  }
+  function md5cycle(x, k) {
+    let [a, b, c, d] = x;
+    a = ff(a, b, c, d, k[0], 7, -680876936);
+    d = ff(d, a, b, c, k[1], 12, -389564586);
+    c = ff(c, d, a, b, k[2], 17, 606105819);
+    b = ff(b, c, d, a, k[3], 22, -1044525330);
+    a = ff(a, b, c, d, k[4], 7, -176418897);
+    d = ff(d, a, b, c, k[5], 12, 1200080426);
+    c = ff(c, d, a, b, k[6], 17, -1473231341);
+    b = ff(b, c, d, a, k[7], 22, -45705983);
+    a = ff(a, b, c, d, k[8], 7, 1770035416);
+    d = ff(d, a, b, c, k[9], 12, -1958414417);
+    c = ff(c, d, a, b, k[10], 17, -42063);
+    b = ff(b, c, d, a, k[11], 22, -1990404162);
+    a = ff(a, b, c, d, k[12], 7, 1804603682);
+    d = ff(d, a, b, c, k[13], 12, -40341101);
+    c = ff(c, d, a, b, k[14], 17, -1502002290);
+    b = ff(b, c, d, a, k[15], 22, 1236535329);
+    a = gg(a, b, c, d, k[1], 5, -165796510);
+    d = gg(d, a, b, c, k[6], 9, -1069501632);
+    c = gg(c, d, a, b, k[11], 14, 643717713);
+    b = gg(b, c, d, a, k[0], 20, -373897302);
+    a = gg(a, b, c, d, k[5], 5, -701558691);
+    d = gg(d, a, b, c, k[10], 9, 38016083);
+    c = gg(c, d, a, b, k[15], 14, -660478335);
+    b = gg(b, c, d, a, k[4], 20, -405537848);
+    a = gg(a, b, c, d, k[9], 5, 568446438);
+    d = gg(d, a, b, c, k[14], 9, -1019803690);
+    c = gg(c, d, a, b, k[3], 14, -187363961);
+    b = gg(b, c, d, a, k[8], 20, 1163531501);
+    a = gg(a, b, c, d, k[13], 5, -1444681467);
+    d = gg(d, a, b, c, k[2], 9, -51403784);
+    c = gg(c, d, a, b, k[7], 14, 1735328473);
+    b = gg(b, c, d, a, k[12], 20, -1926607734);
+    a = hh(a, b, c, d, k[5], 4, -378558);
+    d = hh(d, a, b, c, k[8], 11, -2022574463);
+    c = hh(c, d, a, b, k[11], 16, 1839030562);
+    b = hh(b, c, d, a, k[14], 23, -35309556);
+    a = hh(a, b, c, d, k[1], 4, -1530992060);
+    d = hh(d, a, b, c, k[4], 11, 1272893353);
+    c = hh(c, d, a, b, k[7], 16, -155497632);
+    b = hh(b, c, d, a, k[10], 23, -1094730640);
+    a = hh(a, b, c, d, k[13], 4, 681279174);
+    d = hh(d, a, b, c, k[0], 11, -358537222);
+    c = hh(c, d, a, b, k[3], 16, -722521979);
+    b = hh(b, c, d, a, k[6], 23, 76029189);
+    a = hh(a, b, c, d, k[9], 4, -640364487);
+    d = hh(d, a, b, c, k[12], 11, -421815835);
+    c = hh(c, d, a, b, k[15], 16, 530742520);
+    b = hh(b, c, d, a, k[2], 23, -995338651);
+    a = ii(a, b, c, d, k[0], 6, -198630844);
+    d = ii(d, a, b, c, k[7], 10, 1126891415);
+    c = ii(c, d, a, b, k[14], 15, -1416354905);
+    b = ii(b, c, d, a, k[5], 21, -57434055);
+    a = ii(a, b, c, d, k[12], 6, 1700485571);
+    d = ii(d, a, b, c, k[3], 10, -1894986606);
+    c = ii(c, d, a, b, k[10], 15, -1051523);
+    b = ii(b, c, d, a, k[1], 21, -2054922799);
+    a = ii(a, b, c, d, k[8], 6, 1873313359);
+    d = ii(d, a, b, c, k[15], 10, -30611744);
+    c = ii(c, d, a, b, k[6], 15, -1560198380);
+    b = ii(b, c, d, a, k[13], 21, 1309151649);
+    a = ii(a, b, c, d, k[4], 6, -145523070);
+    d = ii(d, a, b, c, k[11], 10, -1120210379);
+    c = ii(c, d, a, b, k[2], 15, 718787259);
+    b = ii(b, c, d, a, k[9], 21, -343485551);
+    x[0] = (a + x[0]) | 0;
+    x[1] = (b + x[1]) | 0;
+    x[2] = (c + x[2]) | 0;
+    x[3] = (d + x[3]) | 0;
+  }
+  function rhex(n) {
+    let s = "";
+    for (let j = 0; j < 4; j++)
+      s +=
+        ("0" + ((n >> (j * 8 + 4)) & 0x0f).toString(16)) +
+        ((n >> (j * 8)) & 0x0f).toString(16);
+    return s;
+  }
+  function hex(x) {
+    for (let i = 0; i < x.length; i++) x[i] = rhex(x[i]);
+    return x.join("");
+  }
+  return hex(md51(unescape(encodeURIComponent(str))));
+}
+
+function pathOnly(u) {
+  if (!u) return "";
+  let s = String(u);
+  if (s.startsWith("http://") || s.startsWith("https://")) {
+    try {
+      s = new URL(s).pathname;
+    } catch {}
+  }
+  if (s && !s.startsWith("/")) s = `/${s}`;
+  return s;
+}
+
+function signVideoClient(rawPath, v = "3", t1 = "0") {
+  let p = pathOnly(rawPath);
+  if (!p) return "";
+  const timeNow = Math.floor(Date.now() / 1000);
+  const rand = md5browser(p + timeNow).slice(0, 13);
+  const uid = v === "3" ? t1 : "0";
+  const data = `${p}-${timeNow}-${rand}-${uid}-${HLS_KEY}`;
+  const sign = md5browser(data);
+  return `${VID_CDN}${p}?auth_key=${timeNow}-${rand}-${uid}-${sign}&v=${v}&time=${t1}`;
+}
+
+function fileNameOf(p) {
+  if (!p) return "";
+  const s = String(p).split("?")[0];
+  const parts = s.split("/").filter(Boolean);
+  try {
+    return decodeURIComponent(parts[parts.length - 1] || s);
+  } catch {
+    return parts[parts.length - 1] || s;
+  }
+}
+
+function enrichStaticImage(it) {
+  const p = pathOnly(it.path || it.cover_path || "");
+  const name = it.name || it.title || fileNameOf(p) || `#${it.id}`;
+  const cdn_urls = Array.isArray(it.cdn_urls) && it.cdn_urls.length
+    ? it.cdn_urls
+    : p
+      ? IMG_CDNS.map((b) => b + p)
+      : [];
+  const url = cdn_urls[0] || it.url || "";
+  return {
+    ...it,
+    kind: "image",
+    name,
+    title: name,
+    path: p,
+    url,
+    thumb: url,
+    cover: url,
+    cdn_urls,
+    proxy: url ? imgUrl(url) : "",
+  };
+}
+
+function enrichStaticVideo(it) {
+  const p = pathOnly(it.path || "");
+  let name = it.name || it.title || fileNameOf(p) || fileNameOf(it.cover_path) || `#${it.id}`;
+  if (/hacked by dimples|dimples#1337/i.test(name)) {
+    name = fileNameOf(p) || fileNameOf(it.cover_path) || `#${it.id}`;
+  }
+  const coverPath = pathOnly(it.cover_path || it.cover || "");
+  const cdn_urls = Array.isArray(it.cdn_urls) && it.cdn_urls.length
+    ? it.cdn_urls
+    : coverPath
+      ? IMG_CDNS.map((b) => b + coverPath)
+      : [];
+  const cover = cdn_urls[0] || it.cover || "";
+  const play = it.play_url && it.play_url.includes("auth_key=")
+    ? it.play_url
+    : signVideoClient(p);
+  return {
+    ...it,
+    kind: "video",
+    name,
+    title: name,
+    path: p,
+    cover_path: coverPath,
+    cover,
+    thumb: cover,
+    cdn_urls,
+    cover_proxy: cover ? imgUrl(cover) : "",
+    play_url: play,
+  };
+}
+
+async function listMediaStatic({ type = "images", page = 1, pageSize = 48, q = "" } = {}) {
+  const meta = await loadMediaMeta();
+  const p = Math.max(1, Number(page) || 1);
+  const ps = Math.min(200, Math.max(12, Number(pageSize) || 48));
+  const query = String(q || "").trim().toLowerCase();
+  const match = (it) => {
+    if (!query) return true;
+    return (
+      String(it.id).includes(query) ||
+      String(it.pid || "").includes(query) ||
+      String(it.name || "").toLowerCase().includes(query) ||
+      String(it.title || "").toLowerCase().includes(query) ||
+      String(it.path || "").toLowerCase().includes(query)
+    );
+  };
+
+  if (type === "videos") {
+    let arr = (await loadVideos()).map(enrichStaticVideo).filter(match);
+    const total = arr.length;
+    const start = (p - 1) * ps;
+    return { type, page: p, pageSize: ps, total, pages: Math.max(1, Math.ceil(total / ps)), items: arr.slice(start, start + ps), meta };
+  }
+  if (type === "media_videos") {
+    let arr = (await loadMediaVideos()).map(enrichStaticVideo).filter(match);
+    const total = arr.length;
+    const start = (p - 1) * ps;
+    return { type, page: p, pageSize: ps, total, pages: Math.max(1, Math.ceil(total / ps)), items: arr.slice(start, start + ps), meta };
+  }
+
+  // images
+  const totalAll = meta.counts?.post_media_images || 0;
+  const chunks = meta.image_chunks || [];
+  const chunkSize = 5000;
+  if (!query) {
+    const start = (p - 1) * ps;
+    const items = [];
+    for (let i = start; i < start + ps && i < totalAll; i++) {
+      const cidx = Math.floor(i / chunkSize);
+      const local = i % chunkSize;
+      const chunk = await loadImageChunk(cidx);
+      if (chunk[local]) items.push(enrichStaticImage(chunk[local]));
+    }
+    return {
+      type: "images",
+      page: p,
+      pageSize: ps,
+      total: totalAll,
+      pages: Math.max(1, Math.ceil(totalAll / ps)),
+      items,
+      meta,
+    };
+  }
+  // search images: scan chunks
+  let filtered = [];
+  const nChunks = chunks.length || Math.ceil(totalAll / chunkSize);
+  for (let c = 0; c < nChunks; c++) {
+    const chunk = await loadImageChunk(c);
+    for (const it of chunk) {
+      const en = enrichStaticImage(it);
+      if (match(en)) filtered.push(en);
+    }
+  }
+  const total = filtered.length;
+  const start = (p - 1) * ps;
+  return {
+    type: "images",
+    page: p,
+    pageSize: ps,
+    total,
+    pages: Math.max(1, Math.ceil(total / ps)),
+    items: filtered.slice(start, start + ps),
+    meta,
+  };
+}
 
 function mediaHash(type, page, q, pageSize) {
   const ps = new URLSearchParams();
@@ -1284,12 +1634,8 @@ async function renderMedia(route) {
   const pageSize = route.pageSize || 48;
   renderCats(type);
   try {
-    const [meta, data] = await Promise.all([
-      api("/api/media/meta"),
-      api(
-        `/api/media/list?type=${encodeURIComponent(type)}&page=${page}&pageSize=${pageSize}&q=${encodeURIComponent(q)}`
-      ),
-    ]);
+    const data = await listMediaStatic({ type, page, pageSize, q });
+    const meta = data.meta || (await loadMediaMeta());
 
     // refresh top chips with counts
     const countMap = {

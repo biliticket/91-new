@@ -9,14 +9,10 @@
 
 [functions]
   node_bundler = "nft"
-  included_files = [
-    "media_gallery/data/**",
-    "lib/**",
-    "server/**"
-  ]
+  # Do NOT bundle multi‑MB media JSON into the function (causes deploy/runtime 502).
+  # Media JSON is published under public/media-data and read by the browser.
+  included_files = ["lib/**", "server/**"]
 
-# /api/media/meta  -> function path /.netlify/functions/api/media/meta
-# then handler rewrites to /api/media/meta for Express
 [[redirects]]
   from = "/api/*"
   to = "/.netlify/functions/api/:splat"
@@ -29,7 +25,13 @@
   status = 200
   force = true
 
-# SPA fallback last
+# static media-data must not fall through to SPA
+[[redirects]]
+  from = "/media-data/*"
+  to = "/media-data/:splat"
+  status = 200
+  force = true
+
 [[redirects]]
   from = "/*"
   to = "/index.html"
