@@ -134,12 +134,32 @@ app.get("*", (_req, res) => {
   res.sendFile(path.join(ROOT, "public", "index.html"));
 });
 
-// Local / traditional Node host
-if (!process.env.VERCEL) {
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`91bypass clean reader on http://0.0.0.0:${PORT}`);
-    console.log(`upstream: ${UPSTREAM}`);
-  });
+// Local / traditional Node host only.
+// Skip listen under Vercel / Netlify / Lambda serverless runtimes.
+const isServerless = Boolean(
+  process.env.VERCEL ||
+    process.env.NETLIFY ||
+    process.env.AWS_LAMBDA_FUNCTION_NAME ||
+    process.env.LAMBDA_TASK_ROOT
+);
+
+if (!isServerless && process.env.NODE_ENV !== "test") {
+  // Avoid crashing if port is already taken when the module is imported for tooling.
+  try {
+    const server = app.listen(PORT, "0.0.0.0", () => {
+      console.log(`91bypass clean reader on http://0.0.0.0:${PORT}`);
+      console.log(`upstream: ${UPSTREAM}`);
+    });
+    server.on("error", (err) => {
+      if (err && err.code === "EADDRINUSE") {
+        console.warn(`port ${PORT} in use; export app without listening`);
+        return;
+      }
+      console.error(err);
+    });
+  } catch (err) {
+    console.warn("listen skipped:", err?.message || err);
+  }
 }
 
 export default app;

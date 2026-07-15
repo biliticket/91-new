@@ -1,25 +1,35 @@
 [build]
-  # No frontend compile step; install deps then publish public/
   command = "npm install"
   publish = "public"
   functions = "netlify/functions"
 
 [build.environment]
   NODE_VERSION = "20"
+  NETLIFY = "true"
 
 [functions]
-  # Keep function cold-start smaller; media JSON is loaded from publish/function bundle as needed
-  node_bundler = "esbuild"
-  included_files = ["media_gallery/data/**", "lib/**", "server/**"]
+  node_bundler = "nft"
+  included_files = [
+    "media_gallery/data/**",
+    "lib/**",
+    "server/**"
+  ]
 
-# API -> Netlify Function
+# /api/media/meta  -> function path /.netlify/functions/api/media/meta
+# then handler rewrites to /api/media/meta for Express
 [[redirects]]
   from = "/api/*"
-  to = "/.netlify/functions/api"
+  to = "/.netlify/functions/api/:splat"
   status = 200
   force = true
 
-# SPA fallback
+[[redirects]]
+  from = "/api"
+  to = "/.netlify/functions/api/health"
+  status = 200
+  force = true
+
+# SPA fallback last
 [[redirects]]
   from = "/*"
   to = "/index.html"
