@@ -1569,20 +1569,30 @@ function mediaThumbCandidates(it) {
   const out = [];
   const push = (u) => {
     if (!u) return;
-    const v = u.startsWith("/api/") ? u : imgUrl(u);
-    if (v && !out.includes(v)) out.push(v);
+    if (!out.includes(u)) out.push(u);
   };
+  // Prefer plaintext public CDN direct URLs first (works on Netlify without function).
+  // Then encrypted CDN hosts via /api/img decrypt proxy.
+  const raws = [];
   if (it.kind === "video") {
-    push(it.cover_proxy);
-    push(it.cover);
-    push(it.thumb);
-    (it.cdn_urls || []).forEach(push);
+    raws.push(it.cover, it.thumb, ...(it.cdn_urls || []));
   } else {
-    push(it.proxy);
-    push(it.url);
-    push(it.thumb);
-    push(it.cover);
-    (it.cdn_urls || []).forEach(push);
+    raws.push(it.url, it.thumb, it.cover, ...(it.cdn_urls || []));
+  }
+  for (const u of raws) {
+    if (!u) continue;
+    if (String(u).includes("imgpublic.ycomesc.live") || String(u).includes("ycomesc.live")) {
+      push(u); // often plaintext JPEG
+    }
+  }
+  for (const u of raws) {
+    if (!u) continue;
+    // proxy path for possible encrypted hosts
+    push(u.startsWith("/api/") ? u : imgUrl(u));
+  }
+  for (const u of raws) {
+    if (!u) continue;
+    if (!String(u).startsWith("/api/")) push(u);
   }
   return out;
 }
