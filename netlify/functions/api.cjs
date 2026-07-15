@@ -1,6 +1,5 @@
-// CommonJS entry so Netlify's loader can require() this file.
-// Real implementation is ESM and loaded via dynamic import().
+// CommonJS wrapper for Netlify
 exports.handler = async (event, context) => {
-  const { handler } = await import("./handler.mjs");
+  const { handler } = await import("./img-proxy.mjs");
   return handler(event, context);
 };
