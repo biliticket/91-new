@@ -33,7 +33,27 @@ function parseHash() {
   const [path, qs] = raw.split("?");
   const params = new URLSearchParams(qs || "");
   const parts = (path || "").split("/").filter(Boolean);
-  // Media-only: any route resolves to media library
+
+  // Dedicated watch / view pages: #/watch/{type}/{id} or #/view/{type}/{id}
+  if (
+    (parts[0] === "watch" || parts[0] === "view" || parts[0] === "play") &&
+    parts[1] &&
+    parts[2]
+  ) {
+    let type = parts[1];
+    if (!["images", "videos", "media_videos"].includes(type)) type = "videos";
+    return {
+      view: type === "images" ? "view" : "watch",
+      type,
+      id: decodeURIComponent(parts[2]),
+      from: params.get("from") || "",
+      page: Math.max(1, parseInt(params.get("p") || "1", 10) || 1),
+      q: params.get("q") || "",
+      pageSize: Math.max(12, parseInt(params.get("ps") || "48", 10) || 48),
+    };
+  }
+
+  // Library list: #/media/{type}
   let type = "images";
   if (parts[0] === "media" && parts[1]) type = parts[1];
   else if (parts[0] === "videos" || parts[0] === "media_videos" || parts[0] === "images")
@@ -395,10 +415,18 @@ function createPlayer(card, sources, startIndex = 0) {
     clearError();
   }
 
+  function resolvePlayUrl(src) {
+    if (!src) return "";
+    // Already absolute (fresh-signed CDN etc.) — play direct to avoid proxy lag / Netlify miss
+    if (/^https?:\/\//i.test(src)) return src;
+    if (src.startsWith("/")) return src;
+    return `/api/proxy?url=${encodeURIComponent(src)}`;
+  }
+
   function loadSource(i) {
     index = i;
     const src = sources[i].url;
-    const proxied = `/api/proxy?url=${encodeURIComponent(src)}`;
+    const playUrl = resolvePlayUrl(src);
     const token = ++loadToken;
     hasPlayback = false;
     if (hls) { try { hls.destroy(); } catch {} hls = null; }
@@ -409,15 +437,17 @@ function createPlayer(card, sources, startIndex = 0) {
       video.load();
     } catch {}
 
-    if (window.Hls && Hls.isSupported()) {
+    if (window.Hls && Hls.isSupported() && /\.m3u8(\?|$)/i.test(playUrl)) {
       hls = new Hls({
         enableWorker: true,
         maxBufferLength: 30,
+        // Prefer responsive start; springs-like feel = low input latency
+        startLevel: -1,
         xhrSetup(xhr) {
           try { xhr.withCredentials = false; } catch {}
         },
       });
-      hls.loadSource(proxied);
+      hls.loadSource(playUrl);
       hls.attachMedia(video);
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
         if (token !== loadToken) return;
@@ -455,9 +485,9 @@ function createPlayer(card, sources, startIndex = 0) {
         }, 800);
       });
     } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-      video.src = proxied;
+      video.src = playUrl;
     } else {
-      video.src = proxied;
+      video.src = playUrl;
     }
     // Keep user volume/rate across part switches
     try {
@@ -660,7 +690,7 @@ function createPlayer(card, sources, startIndex = 0) {
   // ---- size / theater / system fullscreen ----
   function isFs() {
     const elFs = document.fullscreenElement || document.webkitFullscreenElement;
-    return elFs === card || elFs === document.documentElement || elFs === document.body;
+    return !!elFs;
   }
 
   function clampPlayerHeight(h) {
@@ -715,8 +745,10 @@ function createPlayer(card, sources, startIndex = 0) {
       if (isFs()) {
         await (document.exitFullscreen || document.webkitExitFullscreen)?.call(document);
       } else {
-        // Prefer full document (website fullscreen), fallback to player card
-        const target = document.documentElement;
+        // Prefer fullscreening the watch stage if available, so per-page FS rules apply cleanly.
+        // Fall back to full document for the library / post detail routes.
+        const watchStage = document.querySelector(".watch-page");
+        const target = watchStage || document.documentElement;
         if (target.requestFullscreen) {
           await target.requestFullscreen();
         } else if (target.webkitRequestFullscreen) {
@@ -1071,10 +1103,17 @@ function createPlayer(card, sources, startIndex = 0) {
   applyRate(1, { close: true });
   syncFsIcon();
   {
-    const savedH = readStoredHeight();
-    if (savedH) applyPlayerHeight(savedH, { persist: false });
-    if (readTheaterPref()) setTheater(true, { persist: false });
-    else setTheater(false, { persist: false });
+    // Dedicated watch page: hide free-resize handle (layout uses CSS aspect-ratio)
+    // Theater & system fullscreen buttons stay for user control
+    const isWatchStage = root.classList.contains("watch-player-shell");
+    if (!isWatchStage) {
+      const savedH = readStoredHeight();
+      if (savedH) applyPlayerHeight(savedH, { persist: false });
+      if (readTheaterPref()) setTheater(true, { persist: false });
+      else setTheater(false, { persist: false });
+    } else {
+      if (resizeHandle) resizeHandle.hidden = true;
+    }
   }
   loadSource(index);
   keepControls();
@@ -1181,7 +1220,21 @@ async function route() {
   // force media-only entry
   if (!location.hash || location.hash === "#" || location.hash === "#/") {
     history.replaceState(null, "", mediaHash(r.type || "images", r.page || 1, r.q || "", r.pageSize || 48));
+    return route();
   }
+
+  document.documentElement.classList.toggle("watch-mode", r.view === "watch" || r.view === "view");
+  topbar?.classList.toggle("compact", r.view === "watch" || r.view === "view");
+
+  if (r.view === "watch" || r.view === "view") {
+    document.title = r.view === "watch" ? "播放 · 媒体库" : "查看 · 媒体库";
+    if (searchInput) {
+      searchInput.value = "";
+      toggleSearchClear();
+    }
+    return renderWatch(r);
+  }
+
   document.title =
     r.type === "videos"
       ? "视频表 · 媒体库"
@@ -1255,53 +1308,25 @@ async function loadImageChunk(idx) {
 }
 
 function md5browser(str) {
-  // small md5 for HLS signing (same as gallery)
-  function cmn(q, a, b, x, s, t) {
-    a = (a + q + x + t) | 0;
-    return (((a << s) | (a >>> (32 - s))) + b) | 0;
-  }
-  function ff(a, b, c, d, x, s, t) {
-    return cmn((b & c) | (~b & d), a, b, x, s, t);
-  }
-  function gg(a, b, c, d, x, s, t) {
-    return cmn((b & d) | (c & ~d), a, b, x, s, t);
-  }
-  function hh(a, b, c, d, x, s, t) {
-    return cmn(b ^ c ^ d, a, b, x, s, t);
-  }
-  function ii(a, b, c, d, x, s, t) {
-    return cmn(c ^ (b | ~d), a, b, x, s, t);
-  }
-  function md5blk(s) {
-    const blks = [];
-    for (let i = 0; i < 64; i += 4) {
-      blks[i >> 2] =
-        s.charCodeAt(i) +
-        (s.charCodeAt(i + 1) << 8) +
-        (s.charCodeAt(i + 2) << 16) +
-        (s.charCodeAt(i + 3) << 24);
-    }
-    return blks;
-  }
-  function md51(s) {
-    const n = s.length;
-    const state = [1732584193, -271733879, -1732584194, 271733878];
-    let i;
-    for (i = 64; i <= n; i += 64) md5cycle(state, md5blk(s.substring(i - 64, i)));
-    s = s.substring(i - 64);
-    const tail = Array(16).fill(0);
-    for (i = 0; i < s.length; i++) tail[i >> 2] |= s.charCodeAt(i) << ((i % 4) << 3);
-    tail[i >> 2] |= 0x80 << ((i % 4) << 3);
-    if (i > 55) {
-      md5cycle(state, tail);
-      for (i = 0; i < 16; i++) tail[i] = 0;
-    }
-    tail[14] = n * 8;
-    md5cycle(state, tail);
-    return state;
-  }
+  // Correct MD5 (32-char hex). Previous rhex padding bug produced 48-char garbage → CDN 400.
   function md5cycle(x, k) {
     let [a, b, c, d] = x;
+    function cmn(q, a, b, x, s, t) {
+      a = (a + q + x + t) | 0;
+      return (((a << s) | (a >>> (32 - s))) + b) | 0;
+    }
+    function ff(a, b, c, d, x, s, t) {
+      return cmn((b & c) | (~b & d), a, b, x, s, t);
+    }
+    function gg(a, b, c, d, x, s, t) {
+      return cmn((b & d) | (c & ~d), a, b, x, s, t);
+    }
+    function hh(a, b, c, d, x, s, t) {
+      return cmn(b ^ c ^ d, a, b, x, s, t);
+    }
+    function ii(a, b, c, d, x, s, t) {
+      return cmn(c ^ (b | ~d), a, b, x, s, t);
+    }
     a = ff(a, b, c, d, k[0], 7, -680876936);
     d = ff(d, a, b, c, k[1], 12, -389564586);
     c = ff(c, d, a, b, k[2], 17, 606105819);
@@ -1371,17 +1396,44 @@ function md5browser(str) {
     x[2] = (c + x[2]) | 0;
     x[3] = (d + x[3]) | 0;
   }
+  function md5blk(s) {
+    const blks = [];
+    for (let i = 0; i < 64; i += 4) {
+      blks[i >> 2] =
+        s.charCodeAt(i) +
+        (s.charCodeAt(i + 1) << 8) +
+        (s.charCodeAt(i + 2) << 16) +
+        (s.charCodeAt(i + 3) << 24);
+    }
+    return blks;
+  }
+  function md51(s) {
+    const n = s.length;
+    const state = [1732584193, -271733879, -1732584194, 271733878];
+    let i;
+    for (i = 64; i <= n; i += 64) md5cycle(state, md5blk(s.substring(i - 64, i)));
+    s = s.substring(i - 64);
+    const tail = Array(16).fill(0);
+    for (i = 0; i < s.length; i++) tail[i >> 2] |= s.charCodeAt(i) << ((i % 4) << 3);
+    tail[i >> 2] |= 0x80 << ((i % 4) << 3);
+    if (i > 55) {
+      md5cycle(state, tail);
+      for (let j = 0; j < 16; j++) tail[j] = 0;
+    }
+    tail[14] = n * 8;
+    md5cycle(state, tail);
+    return state;
+  }
   function rhex(n) {
     let s = "";
-    for (let j = 0; j < 4; j++)
-      s +=
-        ("0" + ((n >> (j * 8 + 4)) & 0x0f).toString(16)) +
-        ((n >> (j * 8)) & 0x0f).toString(16);
+    for (let j = 0; j < 4; j++) {
+      const lo = (n >> (j * 8)) & 0xff;
+      s += (lo + 0x100).toString(16).slice(1);
+    }
     return s;
   }
   function hex(x) {
-    for (let i = 0; i < x.length; i++) x[i] = rhex(x[i]);
-    return x.join("");
+    return x.map(rhex).join("");
   }
   return hex(md51(unescape(encodeURIComponent(str))));
 }
@@ -1456,9 +1508,8 @@ function enrichStaticVideo(it) {
       ? IMG_CDNS.map((b) => b + coverPath)
       : [];
   const cover = cdn_urls[0] || it.cover || "";
-  const play = it.play_url && it.play_url.includes("auth_key=")
-    ? it.play_url
-    : signVideoClient(p);
+  // Always re-sign at request time. Baked play_url in JSON expires (auth_key timestamp).
+  const play = p ? signVideoClient(p) : "";
   return {
     ...it,
     kind: "video",
@@ -1558,6 +1609,41 @@ function mediaHash(type, page, q, pageSize) {
   return `#/media/${type || "images"}${qs ? `?${qs}` : ""}`;
 }
 
+function watchHash(type, id, { from, page, q, pageSize } = {}) {
+  const ps = new URLSearchParams();
+  if (from) ps.set("from", from);
+  if (page > 1) ps.set("p", String(page));
+  if (q) ps.set("q", q);
+  if (pageSize && pageSize !== 48) ps.set("ps", String(pageSize));
+  const qs = ps.toString();
+  const kind = type === "images" ? "view" : "watch";
+  return `#/${kind}/${type || "videos"}/${encodeURIComponent(id)}${qs ? `?${qs}` : ""}`;
+}
+
+async function findMediaItem(type, id) {
+  const tid = String(id);
+  if (type === "videos") {
+    const arr = await loadVideos();
+    const raw = arr.find((x) => String(x.id) === tid);
+    return raw ? enrichStaticVideo(raw) : null;
+  }
+  if (type === "media_videos") {
+    const arr = await loadMediaVideos();
+    const raw = arr.find((x) => String(x.id) === tid);
+    return raw ? enrichStaticVideo(raw) : null;
+  }
+  // images — scan chunks
+  const meta = await loadMediaMeta();
+  const total = meta.counts?.post_media_images || 0;
+  const nChunks = meta.image_chunks?.length || Math.ceil(total / 5000) || 0;
+  for (let c = 0; c < nChunks; c++) {
+    const chunk = await loadImageChunk(c);
+    const raw = chunk.find((x) => String(x.id) === tid);
+    if (raw) return enrichStaticImage(raw);
+  }
+  return null;
+}
+
 function fmtDur(sec) {
   sec = Number(sec) || 0;
   const m = Math.floor(sec / 60);
@@ -1597,43 +1683,37 @@ function mediaThumbCandidates(it) {
   return out;
 }
 
-function mediaCardHtml(it) {
+function mediaCardHtml(it, route = {}) {
   const isVideo = it.kind === "video";
   const cands = mediaThumbCandidates(it);
   const title = it.name || it.title || it.path || `#${it.id}`;
   const badge = isVideo
     ? `视频 ${fmtDur(it.duration)}`
     : `图片 ${it.w || "?"}×${it.h || "?"}`;
-  const payload = encodeURIComponent(
-    JSON.stringify({
-      kind: it.kind,
-      id: it.id,
-      name: title,
-      path: it.path,
-      play_url: it.play_url || "",
-      cover: it.cover || "",
-      url: it.url || "",
-      proxy: it.proxy || "",
-      cover_proxy: it.cover_proxy || "",
-      cdn_urls: it.cdn_urls || [],
-    })
-  );
+  const type = route.type || (isVideo ? "videos" : "images");
+  const href = watchHash(type, it.id, {
+    from: mediaHash(type, route.page || 1, route.q || "", route.pageSize || 48),
+    page: route.page,
+    q: route.q,
+    pageSize: route.pageSize,
+  });
   const first = cands[0] || "";
   return `
-    <button type="button" class="card media-card" data-media="${payload}">
+    <a class="card media-card" href="${href}" data-kind="${isVideo ? "video" : "image"}">
       <div class="card-cover${isVideo ? " is-video" : ""}">
         ${
           first
             ? `<img class="media-thumb" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" src="${escapeHtml(first)}" data-cands="${escapeHtml(cands.join("|"))}" />`
             : `<div class="media-ph">无图</div>`
         }
+        ${isVideo ? `<span class="media-play-affordance" aria-hidden="true">${ICONS.play}</span>` : ""}
         <span class="media-badge">${escapeHtml(badge)}</span>
       </div>
       <div class="card-body">
         <div class="card-title">${escapeHtml(title)}</div>
         <div class="card-meta path-meta">${escapeHtml(it.path || "")}</div>
       </div>
-    </button>`;
+    </a>`;
 }
 
 async function renderMedia(route) {
@@ -1660,7 +1740,7 @@ async function renderMedia(route) {
       return `<a class="cat ${active}" href="${mediaHash(t.type, 1, q, pageSize)}">${label}</a>`;
     }).join("");
 
-    const grid = (data.items || []).map(mediaCardHtml).join("");
+    const grid = (data.items || []).map((it) => mediaCardHtml(it, { type, page, q, pageSize })).join("");
     const pages = data.pages || 1;
     const prevHref = page > 1 ? mediaHash(type, page - 1, q, pageSize) : "";
     const nextHref = page < pages ? mediaHash(type, page + 1, q, pageSize) : "";
@@ -1674,7 +1754,7 @@ async function renderMedia(route) {
         </div>
         ${
           grid
-            ? `<div class="grid media-grid">${grid}</div>`
+            ? `<div class="grid media-grid enter">${grid}</div>`
             : messageHtml("没有内容", "换个关键词或类型试试", false)
         }
         <div class="pager">
@@ -1683,17 +1763,6 @@ async function renderMedia(route) {
           <button class="pager-nav" ${page >= pages ? "disabled" : ""} data-href="${nextHref}">下一页</button>
         </div>
       </section>
-      <div class="media-modal" id="mediaModal" hidden>
-        <div class="media-modal-box">
-          <div class="media-modal-head">
-            <strong id="mediaModalTitle">预览</strong>
-            <button type="button" class="media-modal-close" id="mediaModalClose">关闭</button>
-          </div>
-          <div class="media-modal-body" id="mediaModalBody"></div>
-          <div class="media-modal-links" id="mediaModalLinks"></div>
-          <div class="media-modal-err" id="mediaModalErr"></div>
-        </div>
-      </div>
     `);
 
     bindPager();
@@ -1704,131 +1773,147 @@ async function renderMedia(route) {
 }
 
 function bindMediaPage(route) {
-  const form = document.getElementById("mediaSearchForm");
-  const input = document.getElementById("mediaSearchInput");
-  if (form && input) {
-    form.addEventListener("submit", (e) => {
-      e.preventDefault();
-      location.hash = mediaHash(route.type || "images", 1, input.value.trim(), route.pageSize || 48);
-    });
-  }
-
-  main.querySelectorAll(".media-card").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      try {
-        const raw = btn.getAttribute("data-media") || "%7B%7D";
-        openMediaItem(JSON.parse(decodeURIComponent(raw)));
-      } catch (e) {
-        console.error(e);
+  main.querySelectorAll(".media-card img.media-thumb").forEach((img) => {
+    const list = (img.dataset.cands || "").split("|").filter(Boolean);
+    let i = 0;
+    img.onerror = () => {
+      i += 1;
+      if (i < list.length) img.src = list[i];
+      else {
+        img.style.display = "none";
+        const ph = document.createElement("div");
+        ph.className = "media-ph";
+        ph.textContent = "无图";
+        img.parentElement?.insertBefore(ph, img);
       }
-    });
-    const img = btn.querySelector("img.media-thumb");
-    if (img) {
-      const list = (img.dataset.cands || "").split("|").filter(Boolean);
-      let i = 0;
-      img.onerror = () => {
-        i += 1;
-        if (i < list.length) img.src = list[i];
-        else {
-          img.style.display = "none";
-          const ph = document.createElement("div");
-          ph.className = "media-ph";
-          ph.textContent = "无图";
-          img.parentElement?.insertBefore(ph, img);
-        }
-      };
-    }
+    };
   });
-
-  const modal = document.getElementById("mediaModal");
-  const closeBtn = document.getElementById("mediaModalClose");
-  if (closeBtn) closeBtn.addEventListener("click", closeMediaModal);
-  if (modal) {
-    modal.addEventListener("click", (e) => {
-      if (e.target === modal) closeMediaModal();
-    });
-  }
+  // Press feedback on pointer-down (Apple response)
+  main.querySelectorAll(".media-card").forEach((card) => {
+    card.addEventListener(
+      "pointerdown",
+      () => card.classList.add("is-pressing"),
+      { passive: true }
+    );
+    const clear = () => card.classList.remove("is-pressing");
+    card.addEventListener("pointerup", clear, { passive: true });
+    card.addEventListener("pointercancel", clear, { passive: true });
+    card.addEventListener("pointerleave", clear, { passive: true });
+  });
 }
 
-let mediaHls = null;
-function closeMediaModal() {
-  const modal = document.getElementById("mediaModal");
-  if (modal) modal.hidden = true;
-  if (mediaHls) {
-    try {
-      mediaHls.destroy();
-    } catch {}
-    mediaHls = null;
-  }
-  const body = document.getElementById("mediaModalBody");
-  if (body) body.innerHTML = "";
-  destroyPlayers();
-}
+async function renderWatch(route) {
+  setState(loadingHtml());
+  renderCats(route.type || "");
+  const backHref =
+    route.from ||
+    mediaHash(route.type || "videos", route.page || 1, route.q || "", route.pageSize || 48);
 
-function openMediaItem(it) {
-  const modal = document.getElementById("mediaModal");
-  const title = document.getElementById("mediaModalTitle");
-  const body = document.getElementById("mediaModalBody");
-  const links = document.getElementById("mediaModalLinks");
-  const err = document.getElementById("mediaModalErr");
-  if (!modal || !body) return;
-  if (mediaHls) {
-    try {
-      mediaHls.destroy();
-    } catch {}
-    mediaHls = null;
-  }
-  if (title) title.textContent = it.name || it.path || `#${it.id}`;
-  if (err) err.textContent = "";
-  body.innerHTML = "";
-  links.innerHTML = "";
+  try {
+    const it = await findMediaItem(route.type, route.id);
+    if (!it) {
+      setState(messageHtml("未找到内容", "可能已被移除，或 id 无效", true));
+      return;
+    }
 
-  if (it.kind === "video") {
-    const play = it.play_url || "";
-    const video = document.createElement("video");
-    video.controls = true;
-    video.playsInline = true;
-    video.autoplay = true;
-    video.className = "media-preview-video";
-    body.appendChild(video);
-    if (play.includes(".m3u8") && window.Hls && Hls.isSupported()) {
-      mediaHls = new Hls({ enableWorker: true });
-      mediaHls.loadSource(play);
-      mediaHls.attachMedia(video);
-      mediaHls.on(Hls.Events.ERROR, (_, data) => {
-        if (err) {
-          err.textContent =
-            "播放失败（可能 CDN 校验 IP/UA 或签名过期）：" +
-            (data?.details || data?.type || "");
+    const title = it.name || it.title || it.path || `#${it.id}`;
+    document.title = `${title} · 媒体库`;
+
+    if (it.kind === "video" || route.view === "watch") {
+      const play = it.path ? signVideoClient(it.path) : it.play_url || "";
+      const cover = it.cover_proxy || (it.cover ? imgUrl(it.cover) : "");
+      setState(`
+        <section class="watch-page enter-fade">
+          <div class="watch-stage">
+            <div class="watch-chrome">
+              <a class="watch-back" href="${backHref}" aria-label="返回">
+                <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                <span>媒体库</span>
+              </a>
+              <div class="watch-title-wrap">
+                <h1 class="watch-title">${escapeHtml(title)}</h1>
+                ${it.duration ? `<span class="watch-sub">${escapeHtml(fmtDur(it.duration))}</span>` : ""}
+              </div>
+            </div>
+            <div class="player-card watch-player-card">
+              <div class="player-shell watch-player-shell">
+                <video playsinline webkit-playsinline preload="metadata" ${cover ? `poster="${escapeHtml(cover)}"` : ""}></video>
+              </div>
+            </div>
+            <div class="watch-meta">
+              <div class="media-meta-row"><span class="media-meta-k">路径</span><code>${escapeHtml(it.path || "")}</code></div>
+              ${it.id != null ? `<div class="media-meta-row"><span class="media-meta-k">ID</span><code>${escapeHtml(String(it.id))}</code></div>` : ""}
+              ${it.cover ? `<div class="media-meta-row"><span class="media-meta-k">封面</span><a href="${escapeHtml(cover)}" target="_blank" rel="noreferrer">打开</a></div>` : ""}
+            </div>
+            <div class="watch-err" id="watchErr" hidden></div>
+          </div>
+        </section>
+      `);
+
+      const card = main.querySelector(".player-card");
+      if (card && play) {
+        const player = createPlayer(card, [{ url: play, title }], 0);
+        activePlayers.push(player);
+        const v = card.querySelector("video");
+        if (v) {
+          claimPlayback(v);
+          v.play().catch(() => {});
         }
-      });
-    } else if (play) {
-      video.src = play;
+      } else {
+        const err = document.getElementById("watchErr");
+        if (err) {
+          err.hidden = false;
+          err.textContent = "无法生成播放地址";
+        }
+      }
+    } else {
+      const src = it.proxy || (it.url ? imgUrl(it.url) : "");
+      setState(`
+        <section class="watch-page view-page enter-fade">
+          <div class="watch-stage">
+            <div class="watch-chrome">
+              <a class="watch-back" href="${backHref}" aria-label="返回">
+                <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                <span>媒体库</span>
+              </a>
+              <div class="watch-title-wrap">
+                <h1 class="watch-title">${escapeHtml(title)}</h1>
+                ${it.w && it.h ? `<span class="watch-sub">${it.w}×${it.h}</span>` : ""}
+              </div>
+            </div>
+            <div class="media-image-stage watch-image-stage">
+              <img class="media-preview-img" alt="" src="${escapeHtml(src)}" referrerpolicy="no-referrer" id="watchImage" />
+            </div>
+            <div class="watch-meta">
+              <div class="media-meta-row"><span class="media-meta-k">路径</span><code>${escapeHtml(it.path || "")}</code></div>
+              ${src ? `<div class="media-meta-row"><span class="media-meta-k">图片</span><a href="${escapeHtml(src)}" target="_blank" rel="noreferrer">打开原图</a></div>` : ""}
+            </div>
+            <div class="watch-err" id="watchErr" hidden></div>
+          </div>
+        </section>
+      `);
+      const img = document.getElementById("watchImage");
+      if (img && Array.isArray(it.cdn_urls) && it.cdn_urls.length) {
+        let i = 0;
+        const list = it.cdn_urls.map((u) => imgUrl(u));
+        img.onerror = () => {
+          i += 1;
+          if (i < list.length) img.src = list[i];
+          else {
+            const err = document.getElementById("watchErr");
+            if (err) {
+              err.hidden = false;
+              err.textContent = "图片加载失败";
+            }
+          }
+        };
+      }
     }
-    links.innerHTML = `
-      <div>path: <code>${escapeHtml(it.path || "")}</code></div>
-      ${play ? `<div>play: <a href="${escapeHtml(play)}" target="_blank" rel="noreferrer">打开直链</a></div>` : ""}
-      ${it.cover ? `<div>cover: <a href="${escapeHtml(it.cover_proxy || imgUrl(it.cover))}" target="_blank" rel="noreferrer">封面</a></div>` : ""}
-    `;
-  } else {
-    const src = it.proxy || (it.url ? imgUrl(it.url) : "");
-    body.innerHTML = `<img class="media-preview-img" alt="" src="${escapeHtml(src)}" referrerpolicy="no-referrer" />`;
-    const img = body.querySelector("img");
-    if (img && Array.isArray(it.cdn_urls) && it.cdn_urls.length) {
-      let i = 0;
-      const list = it.cdn_urls.map((u) => imgUrl(u));
-      img.onerror = () => {
-        i += 1;
-        if (i < list.length) img.src = list[i];
-        else if (err) err.textContent = "图片加载失败";
-      };
-    }
-    links.innerHTML = `
-      <div>path: <code>${escapeHtml(it.path || "")}</code></div>
-      ${src ? `<div>url: <a href="${escapeHtml(src)}" target="_blank" rel="noreferrer">打开图片</a></div>` : ""}
-    `;
+
+    window.scrollTo({ top: 0, behavior: "instant" in window ? "instant" : "auto" });
+  } catch (e) {
+    setState(messageHtml("加载失败", e.message, true));
   }
-  modal.hidden = false;
 }
 
 /* ---------------- Search field affordances ---------------- */
